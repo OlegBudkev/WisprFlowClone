@@ -1,6 +1,6 @@
 import time
 import pyperclip
-import keyboard
+import ctypes
 
 def insert_text(text):
     if not text:
@@ -15,18 +15,28 @@ def insert_text(text):
         # Ждем обновления буфера обмена
         time.sleep(0.05)
         
-        # Имитируем нажатие Ctrl+V
-        # Отпускаем потенциально зажатые модификаторы, чтобы Ctrl+V сработал корректно
-        keyboard.release('shift')
-        keyboard.release('ctrl')
-        keyboard.release('alt')
-        keyboard.release('windows')
+        # Нативные константы Windows API
+        KEYEVENTF_KEYUP = 0x0002
+        VK_CONTROL = 0x11
+        VK_V = 0x56
+        VK_MENU = 0x12  # Клавиша Alt
         
-        # Отправляем комбинацию клавиш для вставки
-        keyboard.send('ctrl+v')
+        # Нативно отпускаем Alt (если он зажат при Alt+Q / Alt+A),
+        # чтобы Windows не восприняла вставку как Ctrl + Alt + V
+        ctypes.windll.user32.keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0)
+        time.sleep(0.01)
+        
+        # Эмулируем нажатие Ctrl+V
+        ctypes.windll.user32.keybd_event(VK_CONTROL, 0, 0, 0)  # Ctrl Down
+        ctypes.windll.user32.keybd_event(VK_V, 0, 0, 0)        # V Down
+        
+        time.sleep(0.01)
+        
+        ctypes.windll.user32.keybd_event(VK_V, 0, KEYEVENTF_KEYUP, 0)        # V Up
+        ctypes.windll.user32.keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0)  # Ctrl Up
         
         # Даем операционной системе время завершить операцию вставки
-        time.sleep(0.2)
+        time.sleep(0.15)
         
     except Exception as e:
-        print(f"Ошибка при вставке текста: {e}")
+        print(f"Ошибка при нативной вставке текста: {e}")
