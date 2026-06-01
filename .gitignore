@@ -1,0 +1,11 @@
+config.json
+*.wav
+*.mp3
+__pycache__/
+*.pyc
+venv/
+.idea/
+.vscode/
+build/
+dist/
+*.spec

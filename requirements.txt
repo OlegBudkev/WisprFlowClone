@@ -1,0 +1,12 @@
+sounddevice>=0.4.6
+soundfile>=0.12.1
+keyboard>=0.13.5
+pyperclip>=1.8.2
+requests>=2.31.0
+pystray>=0.19.5
+Pillow>=10.0.0
+numpy>=1.24.0
+PyQt6>=6.5.0
+pyinstaller>=6.0.0
+# Для локального распознавания установите вручную:
+# faster-whisper>=1.0.0
