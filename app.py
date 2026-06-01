@@ -5,7 +5,7 @@ import threading
 import keyboard
 from PyQt6.QtWidgets import QApplication, QSystemTrayIcon, QMenu
 from PyQt6.QtCore import QObject, pyqtSignal, Qt
-from PyQt6.QtGui import QIcon, QAction, QPixmap, QPainter, QColor, QPen, QPainterPath, QLinearGradient
+from PyQt6.QtGui import QIcon, QAction, QPixmap, QPainter, QColor, QPen, QPainterPath, QLinearGradient, QBrush
 
 from config_loader import load_config, save_config
 from recorder import AudioRecorder

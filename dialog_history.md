@@ -78,3 +78,9 @@
         *   С помощью GitHub CLI (`gh`) создан новый публичный репозиторий [OlegBudkev/WisprFlowClone](https://github.com/OlegBudkev/WisprFlowClone).
         *   Исходный код успешно опубликован в репозитории.
 
+## Итерация 10: Исправление NameError (QBrush)
+*   **Запрос пользователя**: Ошибка запуска: NameError: name 'QBrush' is not defined.
+*   **Решение**:
+    *   В импорты [app.py](app.py) из `PyQt6.QtGui` добавлен класс `QBrush`, необходимый для отрисовки AI-звёздочек в иконке трея.
+    *   Проведена успешная повторная сборка EXE-файла.
+
