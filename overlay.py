@@ -13,16 +13,16 @@ class WaveformWidget(QWidget):
         self.num_bars = 30
         self.bars = [0.05] * self.num_bars
         self.target_volume = 0.05
-        # Для автоусиления: храним максимальную амплитуду звука за последнее время
-        self.max_observed_volume = 0.08
+        # Для автоусиления: держим порог низким чтобы даже тихий микрофон хорошо отображался
+        self.max_observed_volume = 0.02
         
     def update_volume(self, volume):
         volume = max(0.0, volume)
         
-        # Динамически подстраиваем чувствительность
-        self.max_observed_volume = max(self.max_observed_volume * 0.996, volume, 0.04)
-        normalized_volume = volume / self.max_observed_volume
-        normalized_volume = min(normalized_volume, 1.0)
+        # Динамически подстраиваем чувствительность (агрессивное усиление для слабых микрофонов)
+        self.max_observed_volume = max(self.max_observed_volume * 0.990, volume, 0.02)
+        # Усиливаем сигнал в 1.5x для лучшей видимости
+        normalized_volume = min((volume / self.max_observed_volume) * 1.5, 1.0)
         
         # Обновляем каждый столбик независимо для эффекта "прыгающих" по центру полосок
         for i in range(self.num_bars):
@@ -127,7 +127,7 @@ class RecordingOverlay(QWidget):
         self.timer_container.setStyleSheet("background: transparent; border: none;")
         timer_layout = QHBoxLayout(self.timer_container)
         timer_layout.setContentsMargins(0, 0, 0, 0)
-        timer_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+        timer_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignHCenter)
         
         self.timer_label = QLabel("0:00", self.timer_container)
         self.timer_label.setFont(QFont("Consolas", 11, QFont.Weight.Bold))
@@ -145,7 +145,7 @@ class RecordingOverlay(QWidget):
         self.cancel_container.setStyleSheet("background: transparent; border: none;")
         cancel_layout = QHBoxLayout(self.cancel_container)
         cancel_layout.setContentsMargins(0, 0, 0, 0)
-        cancel_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight)
+        cancel_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignHCenter)
         
         self.cancel_btn = QPushButton("×", self.cancel_container)
         self.cancel_btn.setFixedSize(24, 24)

@@ -185,7 +185,7 @@ class Transcriber:
             print(f"API ключ для LLM провайдера '{provider}' не задан. Пропускаем постобработку.")
             return text
 
-        model = self.config.get("llm_model", "llama-3.3-70b-specdec" if provider == "groq" else "gpt-4o-mini")
+        model = self.config.get("llm_model", "llama-3.3-70b-versatile" if provider == "groq" else "gpt-4o-mini")
 
         if provider == "groq":
             url = "https://api.groq.com/openai/v1/chat/completions"

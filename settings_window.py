@@ -15,6 +15,18 @@ class HotkeyLineEdit(QLineEdit):
         super().__init__(parent)
         self.setPlaceholderText("Нажмите клавиши...")
         self.setReadOnly(True)
+        self.previous_value = ""
+
+    def focusInEvent(self, event):
+        current_text = self.text().strip()
+        if current_text:
+            self.previous_value = current_text
+        super().focusInEvent(event)
+
+    def focusOutEvent(self, event):
+        if not self.text().strip():
+            self.setText(self.previous_value)
+        super().focusOutEvent(event)
 
     def keyPressEvent(self, event):
         key = event.key()
@@ -70,10 +82,39 @@ class HotkeyLineEdit(QLineEdit):
             self.setText(hotkey_str)
             
     def mousePressEvent(self, event):
-        # При клике очищаем поле
+        # При клике запоминаем текущее значение и очищаем поле
         if event.button() == Qt.MouseButton.LeftButton:
+            current_text = self.text().strip()
+            if current_text:
+                self.previous_value = current_text
             self.clear()
             super().mousePressEvent(event)
+
+def ensure_checkmark_files():
+    import base64
+    import os
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    white_path = os.path.join(base_dir, "check_white.png").replace("\\", "/")
+    dark_path = os.path.join(base_dir, "check_dark.png").replace("\\", "/")
+    
+    white_png = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAU0lEQVR4nO2QOxIAIQhDE+5/59hYZBQ/bLWFr4IMwSDwKCNJ3scXsy+JegaAJMsmdUY9VjFPWrpAyY1eZ9HDGx8YX13dzUy8NU8JcGEosfu8/9AAffIz8izVTY4AAAAASUVORK5CYII=")
+    dark_png = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAWklEQVR4nGNgGAUkAzExif/IfCZyNCMbwkS6GxgYXr16wUiyJjExif/ozsfqAjEsirCJYTVADIsfkdnYnM6EzEFWgG4rLn8zYhMkVjOGCxiI0EASwBd4gwcAAPN4IOPv+LmtAAAAAElFTkSuQmCC")
+    
+    if not os.path.exists(white_path):
+        try:
+            with open(white_path, "wb") as f:
+                f.write(white_png)
+        except Exception as e:
+            print(f"Ошибка сохранения check_white.png: {e}")
+            
+    if not os.path.exists(dark_path):
+        try:
+            with open(dark_path, "wb") as f:
+                f.write(dark_png)
+        except Exception as e:
+            print(f"Ошибка сохранения check_dark.png: {e}")
+            
+    return white_path, dark_path
 
 class SettingsWindow(QDialog):
     def __init__(self, app_instance, parent=None):
@@ -82,16 +123,23 @@ class SettingsWindow(QDialog):
         self.config = self.app_instance.config
         
         self.setWindowTitle("Настройки Wispr Clone")
-        self.setFixedSize(460, 550)
+        self.setFixedSize(460, 620)
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowContextHelpButtonHint)
         
         # Установка иконки окна
         if hasattr(self.app_instance, "icons") and "idle" in self.app_instance.icons:
             self.setWindowIcon(self.app_instance.icons["idle"])
         
+        self.last_devices = []
         self.init_ui()
         self.load_settings_into_ui()
         self.apply_theme_qss()
+        
+        # Запуск таймера для периодического опроса устройств в фоне (раз в 2 секунды)
+        from PyQt6.QtCore import QTimer
+        self.device_timer = QTimer(self)
+        self.device_timer.timeout.connect(self.check_and_refresh_devices)
+        self.device_timer.start(2000)
 
     def init_ui(self):
         main_layout = QVBoxLayout(self)
@@ -124,8 +172,9 @@ class SettingsWindow(QDialog):
         audio_layout.setSpacing(8)
         
         self.device_combo = QComboBox(self)
+        self.last_devices = self.get_current_input_devices()
         self.populate_audio_devices()
-        audio_layout.addRow("Микрофон:", self.device_combo)
+        audio_layout.addRow(self.device_combo)
         
         main_layout.addWidget(audio_group)
         
@@ -146,10 +195,10 @@ class SettingsWindow(QDialog):
         ui_layout.addRow("Тема оверлея:", self.theme_combo)
         
         self.llm_check = QCheckBox("Включить умную обработку (LLM)", self)
-        ui_layout.addRow("", self.llm_check)
+        ui_layout.addRow(self.llm_check)
         
         self.autostart_check = QCheckBox("Запускать при старте Windows (Автозагрузка)", self)
-        ui_layout.addRow("", self.autostart_check)
+        ui_layout.addRow(self.autostart_check)
         
         main_layout.addWidget(ui_group)
         
@@ -168,11 +217,17 @@ class SettingsWindow(QDialog):
         btn_layout.addWidget(self.cancel_btn)
         main_layout.addLayout(btn_layout)
 
-    def populate_audio_devices(self):
-        self.device_combo.clear()
-        self.device_combo.addItem("Устройство по умолчанию (Windows)", None)
-        
+    def get_current_input_devices(self):
+        """Возвращает актуальный список WASAPI устройств ввода."""
         try:
+            # Сбрасываем кэш PortAudio только в состоянии простоя (когда не идет запись)
+            if hasattr(self.app_instance, "state") and self.app_instance.state == "idle":
+                try:
+                    sd._terminate()
+                    sd._initialize()
+                except Exception as pe:
+                    print(f"[SettingsWindow] Не удалось сбросить кэш PortAudio: {pe}")
+
             devices = sd.query_devices()
             default_device = sd.query_devices(kind='input')
             default_idx = default_device.get('index', -1) if isinstance(default_device, dict) else -1
@@ -185,12 +240,12 @@ class SettingsWindow(QDialog):
                 if dev['max_input_channels'] > 0:
                     name = dev['name']
                     try:
-                        name = name.encode('cp1251').decode('utf-8')
+                        name = name.encode('latin1').decode('cp1251')
                     except Exception:
                         pass
                     
                     api_name = hostapis[dev['hostapi']]['name']
-                    api_name = api_name.replace("Windows ", "")  # "Windows WASAPI" -> "WASAPI"
+                    api_name = api_name.replace("Windows ", "")
                     
                     item = {
                         "index": i,
@@ -203,17 +258,65 @@ class SettingsWindow(QDialog):
                     if api_name == "WASAPI":
                         wasapi_inputs.append(item)
             
-            # Если есть современные WASAPI-устройства, показываем только их (прячем дубли MME/DirectSound)
-            # Иначе показываем вообще все, что есть в системе, как резервный вариант
-            filtered_inputs = wasapi_inputs if wasapi_inputs else all_inputs
-            
-            for item in filtered_inputs:
-                label = f"{item['name']} [{item['api']}] (Индекс: {item['index']})"
-                if item['is_default']:
-                    label += " [По умолчанию]"
-                self.device_combo.addItem(label, item['index'])
+            return wasapi_inputs if wasapi_inputs else all_inputs
         except Exception as e:
             print(f"Ошибка при получении списка микрофонов: {e}")
+            return []
+
+    def populate_audio_devices(self):
+        """Заполняет выпадающий список устройствами, не сбивая текущий выбор пользователя."""
+        current_selected = None
+        if self.device_combo.count() > 0:
+            try:
+                current_selected = self.device_combo.currentData()
+            except Exception:
+                current_selected = None
+        
+        self.device_combo.clear()
+        self.device_combo.addItem("Устройство по умолчанию (Windows)", None)
+        
+        for item in self.last_devices:
+            label = f"{item['name']} [{item['api']}] (Индекс: {item['index']})"
+            if item['is_default']:
+                label += " [По умолчанию]"
+            self.device_combo.addItem(label, item['index'])
+            
+        # Восстанавливаем ранее выбранный пункт
+        idx = self.device_combo.findData(current_selected)
+        if idx >= 0:
+            self.device_combo.setCurrentIndex(idx)
+        else:
+            self.device_combo.setCurrentIndex(0)
+
+    def check_and_refresh_devices(self):
+        """Проверяет, изменился ли список устройств, и обновляет UI при необходимости."""
+        new_devices = self.get_current_input_devices()
+        
+        # Сравниваем списки устройств по длине и соответствию элементов
+        if len(new_devices) != len(self.last_devices) or \
+           any(d1['index'] != d2['index'] or d1['name'] != d2['name'] for d1, d2 in zip(new_devices, self.last_devices)):
+            print("[SettingsWindow] Обнаружено изменение списка аудиоустройств. Обновление списка...")
+            self.last_devices = new_devices
+            self.populate_audio_devices()
+
+    def nativeEvent(self, eventType, message):
+        """Перехватывает системное сообщение Windows WM_DEVICECHANGE при подключении оборудования."""
+        if eventType == b'windows_generic_MSG':
+            try:
+                import ctypes
+                import ctypes.wintypes
+                # В PyQt6 message может быть как sip.voidptr, так и int
+                addr = int(message)
+                if addr != 0:
+                    msg = ctypes.wintypes.MSG.from_address(addr)
+                    # WM_DEVICECHANGE = 0x0219
+                    if msg.message == 0x0219:
+                        # Даем Windows 500 мс на инициализацию нового устройства перед опросом
+                        from PyQt6.QtCore import QTimer
+                        QTimer.singleShot(500, self.check_and_refresh_devices)
+            except Exception as e:
+                print(f"[SettingsWindow] Ошибка в nativeEvent при обработке события: {e}")
+        return False, 0
 
     def on_provider_changed(self, index):
         self.model_combo.clear()
@@ -353,73 +456,91 @@ class SettingsWindow(QDialog):
             print(f"[Автозагрузка] Ошибка реестра Windows: {e}")
 
     def apply_theme_qss(self):
-        """Стилизует окно настроек в стильный темный вид."""
-        self.setStyleSheet("""
-            QDialog {
-                background-color: #161618;
+        """Стилизует окно настроек в темной теме."""
+        white_path, dark_path = ensure_checkmark_files()
+            
+        # Современный Premium Dark стиль
+        self.setStyleSheet(f"""
+            QDialog {{
+                background-color: #0e0e10;
                 color: #ffffff;
-            }
-            QLabel {
+                font-family: "Segoe UI", -apple-system, sans-serif;
+            }}
+            QLabel {{
                 color: #e0e0e0;
                 font-size: 12px;
-            }
-            QGroupBox {
-                border: 1px solid rgba(255, 255, 255, 0.1);
-                border-radius: 8px;
-                margin-top: 12px;
-                padding-top: 8px;
+                font-weight: 500;
+            }}
+            QGroupBox {{
+                background-color: #18181b;
+                border: 1px solid rgba(255, 255, 255, 0.05);
+                border-radius: 12px;
+                margin-top: 22px;
+                padding: 14px;
                 font-weight: bold;
                 color: #a8ff78;
-            }
-            QGroupBox::title {
+            }}
+            QGroupBox::title {{
                 subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 3px 0 3px;
-            }
-            QLineEdit, QComboBox {
+                subcontrol-position: top left;
+                left: 0px;
+                top: 2px;
+                padding: 0 5px 0 5px;
+            }}
+            QLineEdit, QComboBox {{
                 background-color: #222225;
-                border: 1px solid rgba(255, 255, 255, 0.12);
-                border-radius: 4px;
-                padding: 5px;
+                border: 1px solid rgba(255, 255, 255, 0.08);
+                border-radius: 8px;
+                padding: 6px 10px;
                 color: #ffffff;
-            }
-            QLineEdit:focus, QComboBox:focus {
-                border: 1px solid #78ffd6;
-            }
-            QComboBox::drop-down {
+                font-size: 14px;
+            }}
+            QLineEdit:focus, QComboBox:focus {{
+                border: 1.5px solid #78ffd6;
+                background-color: #1c1c1f;
+            }}
+            QComboBox::drop-down {{
                 border: none;
-            }
-            QComboBox QAbstractItemView {
+                width: 20px;
+            }}
+            QComboBox QAbstractItemView {{
                 background-color: #222225;
                 color: #ffffff;
                 selection-background-color: #a8ff78;
                 selection-color: #161618;
-                border: 1px solid rgba(255, 255, 255, 0.12);
-            }
-            QCheckBox {
+                border: 1px solid rgba(255, 255, 255, 0.08);
+                border-radius: 8px;
+                padding: 4px;
+            }}
+            QCheckBox {{
                 color: #e0e0e0;
                 spacing: 8px;
-            }
-            QPushButton {
+                font-size: 12px;
+                font-weight: 500;
+            }}
+            QPushButton {{
                 background-color: #222225;
-                border: 1px solid rgba(255, 255, 255, 0.12);
-                border-radius: 4px;
-                padding: 6px 16px;
+                border: none;
+                border-radius: 8px;
+                padding: 8px 18px;
                 color: #ffffff;
                 font-weight: bold;
-            }
-            QPushButton:hover {
+                font-size: 12px;
+            }}
+            QPushButton:hover {{
                 background-color: #2a2a2f;
-                border: 1px solid #a8ff78;
-            }
-            QPushButton:default {
-                background-color: #a8ff78;
+            }}
+            QPushButton:default {{
+                background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #a8ff78, stop:1 #78ffd6);
                 color: #161618;
                 border: none;
-            }
-            QPushButton:default:hover {
-                background-color: #78ffd6;
-            }
+            }}
+            QPushButton:default:hover {{
+                background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #b7ff8c, stop:1 #8cffed);
+            }}
+            QPushButton:pressed {{
+                transform: translateY(1px);
+            }}
         """)
 
 if __name__ == "__main__":

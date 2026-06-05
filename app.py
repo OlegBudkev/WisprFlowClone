@@ -2,10 +2,34 @@ import os
 import sys
 import time
 import threading
-import keyboard
-from PyQt6.QtWidgets import QApplication, QSystemTrayIcon, QMenu
+import ctypes
+import ctypes.wintypes
+from PyQt6.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QWidget
 from PyQt6.QtCore import QObject, pyqtSignal, Qt
 from PyQt6.QtGui import QIcon, QAction, QPixmap, QPainter, QColor, QPen, QPainterPath, QLinearGradient, QBrush
+
+# --- Проверка единственной копии (Single Instance) ---
+MUTEX_NAME = "Global\\WisprFlowClone_SingleInstance_Mutex_Unique_12345"
+_app_mutex = None
+
+def check_single_instance():
+    """Проверяет, запущена ли уже копия приложения с помощью именованного мьютекса Windows."""
+    if sys.platform != 'win32':
+        return True
+    
+    global _app_mutex
+    try:
+        kernel32 = ctypes.windll.kernel32
+        # Создаем мьютекс
+        _app_mutex = kernel32.CreateMutexW(None, True, MUTEX_NAME)
+        last_error = kernel32.GetLastError()
+        # ERROR_ALREADY_EXISTS = 183
+        if last_error == 183:
+            return False
+        return True
+    except Exception as e:
+        print(f"[Single Instance] Ошибка при проверке мьютекса: {e}")
+        return True
 
 from config_loader import load_config, save_config
 from recorder import AudioRecorder
@@ -13,9 +37,105 @@ from transcriber import Transcriber
 from inserter import insert_text
 from overlay import RecordingOverlay
 
+def parse_hotkey_to_vks(hotkey_str):
+    """Парсит строку хоткея (например, 'alt+q') в список VK-кодов Windows."""
+    VK_MAP = {
+        'alt': 0x12, 'ctrl': 0x11, 'control': 0x11,
+        'shift': 0x10, 'win': 0x5B, 'windows': 0x5B, 'super': 0x5B,
+        'space': 0x20, 'enter': 0x0D, 'tab': 0x09,
+        'esc': 0x1B, 'backspace': 0x08, 'delete': 0x2E, 'insert': 0x2D,
+    }
+    parts = hotkey_str.lower().split('+')
+    vks = []
+    for part in parts:
+        part = part.strip()
+        if part in VK_MAP:
+            vks.append(VK_MAP[part])
+        elif len(part) == 1:
+            vks.append(ord(part.upper()))
+        elif part.startswith('f') and part[1:].isdigit():
+            vks.append(0x70 + int(part[1:]) - 1)
+    return vks
+
+
+class HotkeyPoller:
+    """Опрашивает GetAsyncKeyState для детекции хоткеев без RegisterHotKey.
+    Не конфликтует с другими приложениями и не требует HWND."""
+
+    def __init__(self, on_hold_pressed, on_hold_released, on_toggle_pressed):
+        self._on_hold_pressed = on_hold_pressed
+        self._on_hold_released = on_hold_released
+        self._on_toggle_pressed = on_toggle_pressed
+        self._hold_vks = []
+        self._toggle_vks = []
+        self._running = False
+        self._thread = None
+
+    def configure(self, hold_hotkey_str, toggle_hotkey_str):
+        self._hold_vks = parse_hotkey_to_vks(hold_hotkey_str)
+        self._toggle_vks = parse_hotkey_to_vks(toggle_hotkey_str)
+        print(f"[Hotkey Poller] Hold='{hold_hotkey_str}' VKs={self._hold_vks}")
+        print(f"[Hotkey Poller] Toggle='{toggle_hotkey_str}' VKs={self._toggle_vks}")
+
+    def start(self):
+        self._running = True
+        self._thread = threading.Thread(target=self._poll_loop, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._running = False
+
+    def restart(self, hold_hotkey_str, toggle_hotkey_str):
+        self.stop()
+        time.sleep(0.05)
+        self.configure(hold_hotkey_str, toggle_hotkey_str)
+        self.start()
+
+    def _all_pressed(self, vks):
+        if not vks:
+            return False
+        for vk in vks:
+            if not (ctypes.windll.user32.GetAsyncKeyState(vk) & 0x8000):
+                return False
+        return True
+
+    def _poll_loop(self):
+        hold_was = False
+        toggle_was = False
+        hold_active = False
+        release_counter = 0
+        DEBOUNCE_LIMIT = 6  # 6 кадров * 20мс = 120мс защиты от дребезга и лагов
+
+        while self._running:
+            hold_now = self._all_pressed(self._hold_vks)
+            toggle_now = self._all_pressed(self._toggle_vks)
+
+            # Hold: нажатие
+            if hold_now:
+                release_counter = 0
+                if not hold_active:
+                    hold_active = True
+                    self._on_hold_pressed()
+            else:
+                # Если клавиши отпущены, ждем DEBOUNCE_LIMIT кадров перед реальным завершением
+                if hold_active:
+                    release_counter += 1
+                    if release_counter >= DEBOUNCE_LIMIT:
+                        hold_active = False
+                        self._on_hold_released()
+
+            # Toggle: только нажатие (Rising edge)
+            if toggle_now and not toggle_was:
+                self._on_toggle_pressed()
+
+            hold_was = hold_now
+            toggle_was = toggle_now
+            time.sleep(0.02)
+
 class HotkeySignalHelper(QObject):
     toggle_signal = pyqtSignal()
     cancel_signal = pyqtSignal()
+    release_signal = pyqtSignal()
 
 class WisprApp(QObject):
     def __init__(self):
@@ -48,6 +168,14 @@ class WisprApp(QObject):
         self.signals = HotkeySignalHelper()
         self.signals.toggle_signal.connect(self.on_toggle)
         self.signals.cancel_signal.connect(self.on_cancel)
+        self.signals.release_signal.connect(self.on_hotkey_hold_released_gui)
+        
+        # Создаем поллер хоткеев (GetAsyncKeyState — без RegisterHotKey, без конфликтов)
+        self.hotkey_poller = HotkeyPoller(
+            on_hold_pressed=self._on_hold_pressed,
+            on_hold_released=self._on_hold_released,
+            on_toggle_pressed=self._on_toggle_pressed,
+        )
         
         # Генерация красивых минималистичных иконок для трея
         self.icons = {
@@ -168,15 +296,20 @@ class WisprApp(QObject):
             self.show_settings_window()
 
     def show_settings_window(self):
-        # Открываем окно настроек, если оно еще не открыто
-        if self.settings_win is None:
-            from settings_window import SettingsWindow
-            self.settings_win = SettingsWindow(self)
-            self.settings_win.finished.connect(self.on_settings_closed)
-            self.settings_win.show()
-        
-        self.settings_win.raise_()
-        self.settings_win.activateWindow()
+        try:
+            # Открываем окно настроек, если оно еще не открыто
+            if self.settings_win is None:
+                from settings_window import SettingsWindow
+                self.settings_win = SettingsWindow(self)
+                self.settings_win.finished.connect(self.on_settings_closed)
+                self.settings_win.show()
+            
+            self.settings_win.raise_()
+            self.settings_win.activateWindow()
+        except Exception as e:
+            import traceback
+            print("[WisprApp] ОШИБКА при открытии окна настроек:")
+            traceback.print_exc()
 
     def on_settings_closed(self):
         self.settings_win = None
@@ -205,20 +338,29 @@ class WisprApp(QObject):
         
         print("Настройки успешно обновлены и применены.")
 
-    def on_hotkey_hold_press(self):
+    def _on_hold_pressed(self):
+        """Вызывается из потока поллера при нажатии hold-хоткея."""
+        print("[WisprApp] Hold-хоткей НАЖАТ. Состояние приложения:", self.state)
         if self.state == "idle":
             self.current_recording_mode = "hold"
             self.signals.toggle_signal.emit()
 
-    def on_hotkey_hold_release(self):
-        if self.state == "recording" and self.current_recording_mode == "hold":
-            self.signals.toggle_signal.emit()
+    def _on_hold_released(self):
+        """Вызывается из потока поллера при отпускании hold-хоткея."""
+        print("[WisprApp] Hold-хоткей ОТПУЩЕН. Состояние приложения:", self.state)
+        self.signals.release_signal.emit()
 
-    def on_hotkey_toggle_click(self):
+    def _on_toggle_pressed(self):
+        """Вызывается из потока поллера при нажатии toggle-хоткея."""
+        print("[WisprApp] Toggle-хоткей НАЖАТ. Состояние приложения:", self.state)
         if self.state == "idle":
             self.current_recording_mode = "toggle"
             self.signals.toggle_signal.emit()
         elif self.state == "recording" and self.current_recording_mode == "toggle":
+            self.signals.toggle_signal.emit()
+
+    def on_hotkey_hold_released_gui(self):
+        if self.state == "recording" and self.current_recording_mode == "hold":
             self.signals.toggle_signal.emit()
 
     def on_toggle(self):
@@ -320,31 +462,16 @@ class WisprApp(QObject):
             print(f"[Автозагрузка] Ошибка при синхронизации пути: {e}")
 
     def register_hotkeys(self):
-        hotkey_hold = self.config.get("hotkey_hold", "alt+q")
-        hotkey_toggle = self.config.get("hotkey_toggle", "alt+a")
-        print(f"Регистрация хоткеев: Hold='{hotkey_hold}', Toggle='{hotkey_toggle}'")
-        try:
-            # Hold режим (Alt+Q)
-            keyboard.add_hotkey(hotkey_hold, self.on_hotkey_hold_press, trigger_on_release=False, suppress=True)
-            keyboard.add_hotkey(hotkey_hold, self.on_hotkey_hold_release, trigger_on_release=True, suppress=True)
-            
-            # Toggle режим (Alt+A)
-            keyboard.add_hotkey(hotkey_toggle, self.on_hotkey_toggle_click, trigger_on_release=False, suppress=True)
-        except Exception as e:
-            print(f"Не удалось зарегистрировать хоткеи: {e}")
-            self.tray_icon.showMessage(
-                "Ошибка регистрации хоткеев",
-                "Не удалось привязать горячие клавиши. Настройте их в окне настроек.",
-                QSystemTrayIcon.MessageIcon.Critical,
-                5000
-            )
+        hold_str = self.config.get("hotkey_hold", "alt+q")
+        toggle_str = self.config.get("hotkey_toggle", "alt+a")
+        print(f"Запуск поллера хоткеев: Hold='{hold_str}', Toggle='{toggle_str}'")
+        self.hotkey_poller.configure(hold_str, toggle_str)
+        self.hotkey_poller.start()
 
     def reregister_hotkeys(self):
-        try:
-            keyboard.unhook_all()
-        except Exception:
-            pass
-        self.register_hotkeys()
+        hold_str = self.config.get("hotkey_hold", "alt+q")
+        toggle_str = self.config.get("hotkey_toggle", "alt+a")
+        self.hotkey_poller.restart(hold_str, toggle_str)
 
     def run(self):
         self.register_hotkeys()
@@ -354,13 +481,14 @@ class WisprApp(QObject):
     def exit_app(self):
         print("Выход...")
         self.tray_icon.hide()
-        try:
-            keyboard.unhook_all()
-        except Exception:
-            pass
+        self.hotkey_poller.stop()
         self.qt_app.quit()
         os._exit(0)
 
 if __name__ == "__main__":
+    if not check_single_instance():
+        print("Wispr уже запущен! Допускается только одна активная копия приложения.")
+        sys.exit(0)
+        
     app = WisprApp()
     app.run()

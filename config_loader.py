@@ -6,7 +6,7 @@ DEFAULT_CONFIG = {
     "stt_provider": "groq",
     "stt_model": "whisper-large-v3",
     "llm_provider": "groq",
-    "llm_model": "llama-3.3-70b-specdec",
+    "llm_model": "llama-3.3-70b-versatile",
     "llm_refinement": False,
     "language": "ru",
     "theme": "dark",

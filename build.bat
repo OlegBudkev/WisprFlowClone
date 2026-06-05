@@ -3,7 +3,7 @@ echo ==========================================
 echo Сборка Wispr Clone в один EXE-файл...
 echo ==========================================
 
-python -m PyInstaller --onefile --noconsole --name "WisprFlowClone" --collect-all sounddevice --collect-all soundfile app.py
+python -m PyInstaller --onefile --noconsole --name "WisprFlowClone" --icon=icon.ico --collect-all sounddevice --collect-all soundfile app.py
 
 if %ERRORLEVEL% NEQ 0 (
     echo [ОШИБКА] Сборка завершилась неудачей!

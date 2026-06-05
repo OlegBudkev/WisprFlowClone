@@ -35,5 +35,12 @@ class TestWisprIntegration(unittest.TestCase):
             success = False
         self.assertTrue(success)
 
+    def test_inserter_clipboard(self):
+        import pyperclip
+        test_str = "test_clipboard_content_12345"
+        pyperclip.copy("")
+        insert_text(test_str)
+        self.assertEqual(pyperclip.paste(), test_str)
+
 if __name__ == "__main__":
     unittest.main()
