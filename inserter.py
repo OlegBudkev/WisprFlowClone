@@ -80,9 +80,9 @@ def _release_modifiers():
 
 
 def insert_text(text):
-    if not text:
+    if not text or not text.strip():
         return
-
+    text = text.strip() + " "
     print(f"Вставка текста: {text[:50]}...")
 
     try:
@@ -96,35 +96,17 @@ def insert_text(text):
         _release_modifiers()
         time.sleep(0.05)
 
-        # Подготовка Unicode-событий ввода для каждого символа текста
-        # Каждый символ требует 2 события: KeyDown и KeyUp
-        n = len(text) * 2
-        inputs = (INPUT * n)()
+        # Симулируем комбинацию Ctrl + V
+        VK_CONTROL = 0x11
+        VK_V = 0x56
 
-        for i, char in enumerate(text):
-            code = ord(char)
-            
-            # Нажатие клавиши Unicode
-            inputs[i * 2].type = INPUT_KEYBOARD
-            inputs[i * 2].union.ki.wVk = 0
-            inputs[i * 2].union.ki.wScan = code
-            inputs[i * 2].union.ki.dwFlags = KEYEVENTF_UNICODE
-            inputs[i * 2].union.ki.time = 0
-            inputs[i * 2].union.ki.dwExtraInfo = None
-
-            # Отпускание клавиши Unicode
-            inputs[i * 2 + 1].type = INPUT_KEYBOARD
-            inputs[i * 2 + 1].union.ki.wVk = 0
-            inputs[i * 2 + 1].union.ki.wScan = code
-            inputs[i * 2 + 1].union.ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP
-            inputs[i * 2 + 1].union.ki.time = 0
-            inputs[i * 2 + 1].union.ki.dwExtraInfo = None
-
-        sent = ctypes.windll.user32.SendInput(n, ctypes.byref(inputs), ctypes.sizeof(INPUT))
-        if sent == n:
-            print(f"[Inserter] Текст успешно отправлен через KEYEVENTF_UNICODE ({n} событий)")
-        else:
-            print(f"[Inserter] Внимание: отправлено {sent} из {n} событий ввода")
+        _send_keys(
+            (VK_CONTROL, False),  # Ctrl Down
+            (VK_V, False),        # V Down
+            (VK_V, True),         # V Up
+            (VK_CONTROL, True),   # Ctrl Up
+        )
+        print("[Inserter] Текст успешно вставлен через Ctrl+V")
 
     except Exception as e:
         print(f"Ошибка при вставке текста: {e}")

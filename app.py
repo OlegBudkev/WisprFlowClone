@@ -4,6 +4,7 @@ import time
 import threading
 import ctypes
 import ctypes.wintypes
+import keyboard
 from PyQt6.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QWidget
 from PyQt6.QtCore import QObject, pyqtSignal, Qt
 from PyQt6.QtGui import QIcon, QAction, QPixmap, QPainter, QColor, QPen, QPainterPath, QLinearGradient, QBrush
@@ -58,32 +59,39 @@ def parse_hotkey_to_vks(hotkey_str):
     return vks
 
 
-class HotkeyPoller:
-    """Опрашивает GetAsyncKeyState для детекции хоткеев без RegisterHotKey.
-    Не конфликтует с другими приложениями и не требует HWND."""
+class KeyboardHotkeyHook:
+    """
+    Перехватывает хоткеи через библиотеку keyboard с suppress=True.
+    Клавиши полностью поглощаются — Telegram и другие приложения не получат событие.
+    """
 
     def __init__(self, on_hold_pressed, on_hold_released, on_toggle_pressed):
-        self._on_hold_pressed = on_hold_pressed
-        self._on_hold_released = on_hold_released
+        self._on_hold_pressed   = on_hold_pressed
+        self._on_hold_released  = on_hold_released
         self._on_toggle_pressed = on_toggle_pressed
-        self._hold_vks = []
-        self._toggle_vks = []
+        self._hold_hotkey_str   = ""
+        self._toggle_hotkey_str = ""
+        self._hold_active   = False
+        self._toggle_active = False
         self._running = False
-        self._thread = None
 
     def configure(self, hold_hotkey_str, toggle_hotkey_str):
-        self._hold_vks = parse_hotkey_to_vks(hold_hotkey_str)
-        self._toggle_vks = parse_hotkey_to_vks(toggle_hotkey_str)
-        print(f"[Hotkey Poller] Hold='{hold_hotkey_str}' VKs={self._hold_vks}")
-        print(f"[Hotkey Poller] Toggle='{toggle_hotkey_str}' VKs={self._toggle_vks}")
+        self._hold_hotkey_str   = hold_hotkey_str
+        self._toggle_hotkey_str = toggle_hotkey_str
+        print(f"[Hook] Hold='{hold_hotkey_str}'")
+        print(f"[Hook] Toggle='{toggle_hotkey_str}'")
 
     def start(self):
         self._running = True
-        self._thread = threading.Thread(target=self._poll_loop, daemon=True)
-        self._thread.start()
+        self._register()
+        print("[Hook] Хоткеи зарегистрированы с подавлением (keyboard library)")
 
     def stop(self):
         self._running = False
+        try:
+            keyboard.unhook_all()
+        except Exception:
+            pass
 
     def restart(self, hold_hotkey_str, toggle_hotkey_str):
         self.stop()
@@ -91,46 +99,53 @@ class HotkeyPoller:
         self.configure(hold_hotkey_str, toggle_hotkey_str)
         self.start()
 
-    def _all_pressed(self, vks):
-        if not vks:
-            return False
-        for vk in vks:
-            if not (ctypes.windll.user32.GetAsyncKeyState(vk) & 0x8000):
-                return False
-        return True
+    def _register(self):
+        # --- Hold хоткей: нажатие ---
+        keyboard.add_hotkey(
+            self._hold_hotkey_str,
+            self._on_hold_key_down,
+            suppress=True,
+            trigger_on_release=False,
+        )
+        # --- Hold хоткей: отпускание ---
+        keyboard.add_hotkey(
+            self._hold_hotkey_str,
+            self._on_hold_key_up,
+            suppress=True,
+            trigger_on_release=True,
+        )
+        # --- Toggle хоткей: нажатие ---
+        keyboard.add_hotkey(
+            self._toggle_hotkey_str,
+            self._on_toggle_key_down,
+            suppress=True,
+            trigger_on_release=False,
+        )
+        # --- Toggle хоткей: отпускание ---
+        keyboard.add_hotkey(
+            self._toggle_hotkey_str,
+            self._on_toggle_key_up,
+            suppress=True,
+            trigger_on_release=True,
+        )
 
-    def _poll_loop(self):
-        hold_was = False
-        toggle_was = False
-        hold_active = False
-        release_counter = 0
-        DEBOUNCE_LIMIT = 6  # 6 кадров * 20мс = 120мс защиты от дребезга и лагов
+    def _on_hold_key_down(self):
+        if not self._hold_active:
+            self._hold_active = True
+            threading.Thread(target=self._on_hold_pressed, daemon=True).start()
 
-        while self._running:
-            hold_now = self._all_pressed(self._hold_vks)
-            toggle_now = self._all_pressed(self._toggle_vks)
+    def _on_hold_key_up(self):
+        if self._hold_active:
+            self._hold_active = False
+            threading.Thread(target=self._on_hold_released, daemon=True).start()
 
-            # Hold: нажатие
-            if hold_now:
-                release_counter = 0
-                if not hold_active:
-                    hold_active = True
-                    self._on_hold_pressed()
-            else:
-                # Если клавиши отпущены, ждем DEBOUNCE_LIMIT кадров перед реальным завершением
-                if hold_active:
-                    release_counter += 1
-                    if release_counter >= DEBOUNCE_LIMIT:
-                        hold_active = False
-                        self._on_hold_released()
+    def _on_toggle_key_down(self):
+        if not self._toggle_active:
+            self._toggle_active = True
+            threading.Thread(target=self._on_toggle_pressed, daemon=True).start()
 
-            # Toggle: только нажатие (Rising edge)
-            if toggle_now and not toggle_was:
-                self._on_toggle_pressed()
-
-            hold_was = hold_now
-            toggle_was = toggle_now
-            time.sleep(0.02)
+    def _on_toggle_key_up(self):
+        self._toggle_active = False
 
 class HotkeySignalHelper(QObject):
     toggle_signal = pyqtSignal()
@@ -170,8 +185,8 @@ class WisprApp(QObject):
         self.signals.cancel_signal.connect(self.on_cancel)
         self.signals.release_signal.connect(self.on_hotkey_hold_released_gui)
         
-        # Создаем поллер хоткеев (GetAsyncKeyState — без RegisterHotKey, без конфликтов)
-        self.hotkey_poller = HotkeyPoller(
+        # Создаём перехватчик хоткеев с подавлением (keyboard library, suppress=True)
+        self.hotkey_poller = KeyboardHotkeyHook(
             on_hold_pressed=self._on_hold_pressed,
             on_hold_released=self._on_hold_released,
             on_toggle_pressed=self._on_toggle_pressed,
